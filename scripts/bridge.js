@@ -115,6 +115,40 @@ Hooks.on("createChatMessage", async (message) => {
   }
 });
 
+// ── Account bridge: provisioning ops (executed by the primary GM client) ───────
+// MythrOS web sends {id, op, args}; we run the Foundry-side change and reply.
+// Accounts are created PASSWORDLESS — the member sets their password on first login.
+async function handleProvisionOp(op, args) {
+  switch (op) {
+    case "ensure_user": {
+      const name = String(args.login || "Adventurer");
+      let user = (game.users.getName?.(name)) || game.users.find((u) => u.name === name);
+      if (!user) user = await User.create({ name, role: args.role ?? 1, password: "" });
+      return { userId: user.id };
+    }
+    case "create_actor": {
+      const actorData = foundry.utils.duplicate(args.actor || {});
+      if (args.owner) {
+        actorData.ownership = Object.assign(actorData.ownership || {}, { [args.owner]: 3 }); // 3 = OWNER
+      }
+      const actor = await Actor.create(actorData);
+      return { actorId: actor.id };
+    }
+    case "reset_password": {
+      const u = game.users.get(args.userId);
+      if (u) await u.update({ password: "" }); // cleared → member sets it on next login
+      return {};
+    }
+    case "set_role": {
+      const u = game.users.get(args.userId);
+      if (u) await u.update({ role: args.role });
+      return {};
+    }
+    default:
+      throw new Error(`unknown op: ${op}`);
+  }
+}
+
 // ── Discord → Foundry (WebSocket) ──────────────────────────────────────────────
 let _ws = null;
 let _reconnectTimer = null;
@@ -143,6 +177,21 @@ function connectSocket() {
   _ws.addEventListener("message", async (ev) => {
     try {
       const data = JSON.parse(ev.data);
+
+      // Account-bridge provisioning op: {id, op, args} → reply {id, ok, result|error}.
+      // Rides the same socket as relay; only the canonical GM (with create rights) acts.
+      if (data.op) {
+        if (!isPrimaryGM()) return;
+        let reply;
+        try {
+          reply = { id: data.id, ok: true, result: await handleProvisionOp(data.op, data.args || {}) };
+        } catch (e) {
+          reply = { id: data.id, ok: false, error: String(e?.message || e) };
+        }
+        try { _ws.send(JSON.stringify(reply)); } catch (e) {}
+        return;
+      }
+
       if (data.origin !== "discord") return;
       if (!isPrimaryGM()) return; // only the canonical GM injects, once
       const speaker = (data.speaker || "Discord").slice(0, 80);

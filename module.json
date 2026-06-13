@@ -1,8 +1,8 @@
 {
   "id": "mythros-foundry-bridge",
   "title": "MythrOS Foundry Bridge",
-  "description": "Two-way chat + dice-roll relay between a Foundry VTT (dnd5e) world and the MythrOS Discord server for KoTT.gg / Ashreach. Rolls and chat in the live session mirror both ways. D&D 5e only.",
-  "version": "0.1.0",
+  "description": "MythrOS ⇄ Foundry VTT (dnd5e) bridge for KoTT.gg / Ashreach: two-way chat + dice-roll relay AND account provisioning (auto-create Foundry accounts + imported characters, role sync, password reset) over one socket. D&D 5e only.",
+  "version": "0.2.0",
   "compatibility": {
     "minimum": "12",
     "verified": "13",
