@@ -1,0 +1,26 @@
+{
+  "id": "mythros-foundry-bridge",
+  "title": "MythrOS Foundry Bridge",
+  "description": "MythrOS ⇄ Foundry VTT (dnd5e) bridge for KoTT.gg / Ashreach: two-way chat + dice-roll relay AND account provisioning (auto-create Foundry accounts + imported characters, role sync, password reset) over one socket. D&D 5e only.",
+  "version": "0.2.0",
+  "compatibility": {
+    "minimum": "12",
+    "verified": "13",
+    "maximum": "13"
+  },
+  "authors": [
+    { "name": "KoTT.gg / MythrOS" }
+  ],
+  "esmodules": [
+    "scripts/bridge.js"
+  ],
+  "relationships": {
+    "systems": [
+      { "id": "dnd5e", "type": "system", "compatibility": {} }
+    ]
+  },
+  "socket": false,
+  "url": "https://github.com/Hawkyns-DND/mythros-foundry-bridge",
+  "manifest": "https://raw.githubusercontent.com/Hawkyns-DND/mythros-foundry-bridge/main/module.json",
+  "download": "https://raw.githubusercontent.com/Hawkyns-DND/mythros-foundry-bridge/main/module.zip"
+}
