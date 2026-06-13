@@ -68,7 +68,77 @@ Hooks.once("init", () => {
     name: "Relay chat messages",
     scope: "world", config: true, type: Boolean, default: true,
   });
+  game.settings.register(MOD, "syncEconomy", {
+    name: "Sync economy from MythrOS",
+    hint: "On session start, pull each bridged actor's gold from MythrOS (the economy authority).",
+    scope: "world", config: true, type: Boolean, default: true,
+  });
 });
+
+// ── Phase 2 live sync ─────────────────────────────────────────────────────────
+// Combat state (HP / temp / death saves) is pushed Foundry → MythrOS as it changes;
+// economy (gold) is pulled MythrOS → Foundry on session start. Only the primary GM
+// acts, and only for actors carrying flags.mythros.characterId.
+
+// Foundry → MythrOS: HP / death-save changes.
+Hooks.on("updateActor", async (actor, changes) => {
+  try {
+    if (!S("relayEnabled") || !isPrimaryGM()) return;
+    const cid = actor.flags?.mythros?.characterId;
+    if (!cid) return;
+    // Only push when an HP or death-save field actually changed.
+    const hpChanged = changes.system?.attributes?.hp !== undefined;
+    const deathChanged = changes.system?.attributes?.death !== undefined;
+    if (!hpChanged && !deathChanged) return;
+
+    const secret = S("sharedSecret");
+    const base = (S("webBaseUrl") || "").replace(/\/+$/, "");
+    if (!secret || !base) return;
+
+    const attrs = actor.system?.attributes || {};
+    await fetch(`${base}/api/v1/foundry/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${secret}` },
+      body: JSON.stringify({
+        character_id: Number(cid),
+        hp_current: attrs.hp?.value ?? null,
+        hp_temp: attrs.hp?.temp ?? null,
+        death_successes: attrs.death?.success ?? null,
+        death_failures: attrs.death?.failure ?? null,
+      }),
+    });
+  } catch (err) {
+    console.warn(`${MOD} | combat sync (Foundry→MythrOS) failed`, err);
+  }
+});
+
+// MythrOS → Foundry: pull authoritative gold for every bridged actor on session start.
+async function pullEconomy() {
+  if (!isPrimaryGM() || !S("syncEconomy")) return;
+  const secret = S("sharedSecret");
+  const base = (S("webBaseUrl") || "").replace(/\/+$/, "");
+  if (!secret || !base) return;
+  for (const actor of game.actors) {
+    const cid = actor.flags?.mythros?.characterId;
+    if (!cid) continue;
+    try {
+      const res = await fetch(`${base}/api/v1/foundry/actor/${Number(cid)}`, {
+        headers: { "Authorization": `Bearer ${secret}` },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const gp = data?.system?.currency?.gp;
+      // Setting currency fires updateActor, but our hook above only pushes on
+      // HP/death changes, so this never loops back into a sync.
+      if (typeof gp === "number" && gp !== actor.system?.currency?.gp) {
+        await actor.update({ "system.currency.gp": gp });
+      }
+    } catch (err) {
+      console.warn(`${MOD} | economy pull failed for actor`, cid, err);
+    }
+  }
+}
+Hooks.once("ready", () => { if (game.user?.isGM) pullEconomy(); });
 
 // ── Foundry → Discord ─────────────────────────────────────────────────────────
 Hooks.on("createChatMessage", async (message) => {

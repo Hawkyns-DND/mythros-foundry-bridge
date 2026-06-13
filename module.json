@@ -2,7 +2,7 @@
   "id": "mythros-foundry-bridge",
   "title": "MythrOS Foundry Bridge",
   "description": "MythrOS ⇄ Foundry VTT (dnd5e) bridge for KoTT.gg / Ashreach: two-way chat + dice-roll relay AND account provisioning (auto-create Foundry accounts + imported characters, role sync, password reset) over one socket. D&D 5e only.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "compatibility": {
     "minimum": "12",
     "verified": "13",
