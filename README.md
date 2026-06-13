@@ -37,6 +37,22 @@ GM** relays/injects (so multiple open clients don't multiply a message).
 
 ---
 
+## Combat augmentation (MythrOS combat feel)
+
+Layered on top of the dnd5e combat engine — it does **not** replace it. Toggle with the
+**MythrOS combat augmentation** master setting.
+
+| Feature | What it does |
+|---------|--------------|
+| **Hidden monster HP** | When combat begins, non-PC token bars are set GM-only so players can't read monster HP. (Setting: *Hide monster HP from players*.) |
+| **Turn-prep declarations** | When the active turn lands on a PC you own, you're prompted to declare movement / action / bonus / target / notes. The declaration posts to chat and is stored on the combatant. |
+| **Permadeath** | A PC that reaches **3 death-save failures** is locked dead — a death status overlay is applied and a death card posts. Death is permanent. |
+
+> Phase A is **Foundry-local**. Phase B wires turn-prep, HP, and permadeath two-way to a live
+> Discord combat tracker so the table can act from either side.
+
+---
+
 ## Install
 
 1. In Foundry: **Add-on Modules → Install Module**, paste the manifest URL:
@@ -50,6 +66,8 @@ GM** relays/injects (so multiple open clients don't multiply a message).
    | Bridge shared secret | the value of `FOUNDRY_BRIDGE_SECRET` set on the bot/web |
    | GM Discord user ID | the Discord user id of the GM running sessions |
    | Enable relay / rolls / chat | on |
+   | MythrOS combat augmentation | on (hidden HP / turn-prep / permadeath) |
+   | Hide monster HP from players | on |
 
 The relay only fires while that GM has a **live MythrOS session** (provisioned /
 active / campfire). Foundry→Discord lands in that session's in-game channel; if the

@@ -1,5 +1,9 @@
 /**
- * MythrOS Foundry Bridge — Phase 3 relay (client/GM-browser side).
+ * MythrOS Foundry Bridge — relay + sync + combat augmentation (client/GM-browser side).
+ *
+ * Phase A combat augmentation (this build): hidden monster HP, async turn-prep
+ * declarations, and permadeath, layered on the dnd5e engine (Foundry-local; Phase B
+ * wires these two-way to Discord).
  *
  * Mirrors chat + dice rolls between this Foundry world and the MythrOS Discord
  * session in BOTH directions:
@@ -73,6 +77,16 @@ Hooks.once("init", () => {
     hint: "On session start, pull each bridged actor's gold from MythrOS (the economy authority).",
     scope: "world", config: true, type: Boolean, default: true,
   });
+  game.settings.register(MOD, "combatModule", {
+    name: "MythrOS combat augmentation",
+    hint: "Layer the MythrOS combat feel on dnd5e: hidden monster HP, turn-prep declarations, and permadeath. Master switch for the combat features.",
+    scope: "world", config: true, type: Boolean, default: true,
+  });
+  game.settings.register(MOD, "hideNpcHp", {
+    name: "Hide monster HP from players",
+    hint: "When a combat starts, set non-PC token bars to GM-only so players can't read monster HP.",
+    scope: "world", config: true, type: Boolean, default: true,
+  });
 });
 
 // ── Phase 2 live sync ─────────────────────────────────────────────────────────
@@ -139,6 +153,111 @@ async function pullEconomy() {
   }
 }
 Hooks.once("ready", () => { if (game.user?.isGM) pullEconomy(); });
+
+// ── Phase A — MythrOS combat augmentation ──────────────────────────────────────
+// Hidden monster HP, async turn-prep declarations, and permadeath, layered on the
+// dnd5e engine. Foundry-local in Phase A; Phase B syncs these to Discord.
+
+const DEATH_FAILS_FATAL = 3;
+
+function combatEnabled() {
+  return S("combatModule");
+}
+
+/** Hide non-PC token HP bars from players when a combat begins (primary GM only). */
+async function hideMonsterHp(combat) {
+  if (!combatEnabled() || !S("hideNpcHp") || !isPrimaryGM()) return;
+  const ownerOnly = CONST.TOKEN_DISPLAY_MODES.OWNER;
+  for (const c of combat?.combatants ?? []) {
+    const token = c.token;   // TokenDocument
+    const actor = c.actor;
+    if (!token || !actor || actor.type === "character") continue;
+    if (token.displayBars === ownerOnly) continue;
+    try { await token.update({ displayBars: ownerOnly }); } catch (e) { /* best-effort */ }
+  }
+}
+
+Hooks.on("combatStart", (combat) => hideMonsterHp(combat));
+Hooks.on("createCombat", (combat) => hideMonsterHp(combat));
+
+// Turn-prep: when the active turn lands on a PC you own, prompt a declaration.
+let _lastPrepKey = null;
+Hooks.on("updateCombat", async (combat, changes) => {
+  try {
+    if (!combatEnabled()) return;
+    if (changes.turn === undefined && changes.round === undefined) return;
+    const c = combat.combatant;
+    const actor = c?.actor;
+    if (!actor || actor.type !== "character" || !actor.isOwner) return;
+    if (game.user.isGM) return; // players declare; the GM runs the table
+    const key = `${combat.id}:${combat.round}:${combat.turn}`;
+    if (_lastPrepKey === key) return; // one prompt per turn
+    _lastPrepKey = key;
+    await promptTurnPrep(combat, c);
+  } catch (err) {
+    console.warn(`${MOD} | turn-prep prompt failed`, err);
+  }
+});
+
+async function promptTurnPrep(combat, combatant) {
+  const field = (name, label, ph) =>
+    `<div class="form-group"><label>${label}</label><input type="text" name="${name}" placeholder="${ph}"/></div>`;
+  const content = `
+    <p>It's <strong>${combatant.name}</strong>'s turn. Declare your intent (optional):</p>
+    ${field("movement", "Movement", "where you move")}
+    ${field("action", "Action", "attack / cast / dash …")}
+    ${field("bonus_action", "Bonus action", "off-hand / spell …")}
+    ${field("target", "Target", "who / what")}
+    ${field("notes", "Notes", "anything else")}`;
+  const prep = await foundry.applications.api.DialogV2.prompt({
+    window: { title: "Declare your turn", icon: "fa-solid fa-clipboard-list" },
+    content,
+    ok: { label: "Declare", callback: (_e, btn) => {
+      const f = btn.form;
+      return {
+        movement: f.movement.value.trim(),
+        action: f.action.value.trim(),
+        bonus_action: f.bonus_action.value.trim(),
+        target: f.target.value.trim(),
+        notes: f.notes.value.trim(),
+      };
+    } },
+  }).catch(() => null);
+  if (!prep) return;
+  try { await combatant.setFlag(MOD, "turnPrep", prep); } catch (e) { /* best-effort */ }
+  const lines = [
+    prep.movement && `<strong>Move:</strong> ${prep.movement}`,
+    prep.action && `<strong>Action:</strong> ${prep.action}`,
+    prep.bonus_action && `<strong>Bonus:</strong> ${prep.bonus_action}`,
+    prep.target && `<strong>Target:</strong> ${prep.target}`,
+    prep.notes && `<strong>Notes:</strong> ${prep.notes}`,
+  ].filter(Boolean);
+  if (!lines.length) return;
+  await ChatMessage.create({
+    speaker: { alias: `${combatant.name} — turn declaration` },
+    content: `<div class="mythros-turn-prep">${lines.join("<br>")}</div>`,
+  });
+}
+
+// Permadeath: a bridged PC at 3 death-save failures is locked dead (Foundry-local in A).
+Hooks.on("updateActor", async (actor, changes) => {
+  try {
+    if (!combatEnabled() || !isPrimaryGM()) return;
+    if (changes.system?.attributes?.death === undefined) return;
+    if (actor.type !== "character") return;
+    const fails = actor.system?.attributes?.death?.failure ?? 0;
+    if (fails < DEATH_FAILS_FATAL) return;
+    if (actor.getFlag(MOD, "permadead")) return; // already handled
+    await actor.setFlag(MOD, "permadead", true);
+    try { await actor.toggleStatusEffect?.("dead", { active: true, overlay: true }); } catch (e) { /* best-effort */ }
+    await ChatMessage.create({
+      speaker: { alias: "The Ash Remembers" },
+      content: `<div class="mythros-permadeath"><h3>☠️ ${actor.name} has fallen.</h3><p>Three death-save failures. The Ash takes them — this death is permanent.</p></div>`,
+    });
+  } catch (err) {
+    console.warn(`${MOD} | permadeath lock failed`, err);
+  }
+});
 
 // ── Foundry → Discord ─────────────────────────────────────────────────────────
 Hooks.on("createChatMessage", async (message) => {
