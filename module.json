@@ -1,0 +1,26 @@
+{
+  "id": "mythros-foundry-bridge",
+  "title": "MythrOS Foundry Bridge",
+  "description": "Two-way chat + dice-roll relay between a Foundry VTT (dnd5e) world and the MythrOS Discord server for KoTT.gg / Ashreach. Rolls and chat in the live session mirror both ways. D&D 5e only.",
+  "version": "0.1.0",
+  "compatibility": {
+    "minimum": "12",
+    "verified": "13",
+    "maximum": "13"
+  },
+  "authors": [
+    { "name": "KoTT.gg / MythrOS" }
+  ],
+  "esmodules": [
+    "scripts/bridge.js"
+  ],
+  "relationships": {
+    "systems": [
+      { "id": "dnd5e", "type": "system", "compatibility": {} }
+    ]
+  },
+  "socket": false,
+  "url": "https://github.com/Hawkyns-DND/mythros-foundry-bridge",
+  "manifest": "https://github.com/Hawkyns-DND/mythros-foundry-bridge/releases/latest/download/module.json",
+  "download": "https://github.com/Hawkyns-DND/mythros-foundry-bridge/releases/latest/download/module.zip"
+}
