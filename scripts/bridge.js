@@ -160,6 +160,10 @@ Hooks.once("ready", () => { if (game.user?.isGM) pullEconomy(); });
 
 const DEATH_FAILS_FATAL = 3;
 
+// True while we're applying a Discord-driven snapshot to Foundry, so our own
+// outbound combat hooks skip those changes (no echo back to MythrOS).
+let _applyingDiscord = false;
+
 function combatEnabled() {
   return S("combatModule");
 }
@@ -242,6 +246,7 @@ async function promptTurnPrep(combat, combatant) {
 // Permadeath: a bridged PC at 3 death-save failures is locked dead (Foundry-local in A).
 Hooks.on("updateActor", async (actor, changes) => {
   try {
+    if (_applyingDiscord) return;
     if (!combatEnabled() || !isPrimaryGM()) return;
     if (changes.system?.attributes?.death === undefined) return;
     if (actor.type !== "character") return;
@@ -302,17 +307,21 @@ function combatantsPayload(combat) {
 }
 
 // Combat start → mirror the tracker.
-Hooks.on("combatStart", (combat) =>
-  postCombat("combat_start", { combatants: combatantsPayload(combat), hide_npc_hp: S("hideNpcHp") }));
+Hooks.on("combatStart", (combat) => {
+  if (_applyingDiscord) return;
+  postCombat("combat_start", { combatants: combatantsPayload(combat), hide_npc_hp: S("hideNpcHp") });
+});
 
 // Turn / round advance → advance the bot tracker.
 Hooks.on("updateCombat", (combat, changes) => {
+  if (_applyingDiscord) return;
   if (changes.turn === undefined && changes.round === undefined) return;
   postCombat("turn_advance", { name: combat.combatant?.name || null });
 });
 
 // HP change on a combatant in the active fight → mirror it.
 Hooks.on("updateActor", (actor, changes) => {
+  if (_applyingDiscord) return;
   if (changes.system?.attributes?.hp === undefined) return;
   const combat = game.combats?.active;
   if (!combat?.started) return;
@@ -324,10 +333,67 @@ Hooks.on("updateActor", (actor, changes) => {
 
 // A player's turn-prep declaration (the flag set in Phase A) → relay to Discord.
 Hooks.on("updateCombatant", (combatant, changes) => {
+  if (_applyingDiscord) return;
   const prep = changes.flags?.mythros?.turnPrep;
   if (!prep) return;
   postCombat("turn_prep", { name: combatant.name, user_id: 0, ...prep });
 });
+
+// ── Phase B2 — apply Discord-driven combat state to Foundry ────────────────────
+// A snapshot (combatants + current turn + hp_visible) arrives over the WS when the
+// table acts on the Discord side; the primary GM applies it to tokens + turn order.
+
+function combatantByName(combat, name) {
+  return combat?.combatants?.find((cb) => cb.name === name) || null;
+}
+
+/** Resolve the Foundry actor for a snapshot combatant: the in-combat token actor
+ *  first (handles unlinked NPCs), then a bridged PC by characterId, then by name. */
+function actorForSnapshot(combat, c) {
+  const cb = combatantByName(combat, c.name);
+  if (cb?.actor) return { actor: cb.actor, combatant: cb };
+  if (c.character_id) {
+    const a = game.actors.find((x) => Number(x.flags?.mythros?.characterId) === Number(c.character_id));
+    if (a) return { actor: a, combatant: null };
+  }
+  return { actor: game.actors.getName?.(c.name) || null, combatant: null };
+}
+
+async function applyDiscordCombat(data) {
+  if (!combatEnabled() || !isPrimaryGM()) return;
+  _applyingDiscord = true;
+  try {
+    const combat = game.combats?.active;
+    for (const c of data.combatants || []) {
+      const { actor, combatant } = actorForSnapshot(combat, c);
+      if (actor) {
+        const update = {};
+        if (c.hp_current !== null && c.hp_current !== undefined) update["system.attributes.hp.value"] = c.hp_current;
+        if (c.hp_max !== null && c.hp_max !== undefined) update["system.attributes.hp.max"] = c.hp_max;
+        if (c.is_player) {
+          if (c.death_failures !== null && c.death_failures !== undefined) update["system.attributes.death.failure"] = c.death_failures;
+          if (c.death_successes !== null && c.death_successes !== undefined) update["system.attributes.death.success"] = c.death_successes;
+        }
+        if (Object.keys(update).length) { try { await actor.update(update); } catch (e) { /* best-effort */ } }
+      }
+      if (combatant && c.dead && !combatant.isDefeated) {
+        try { await combatant.update({ defeated: true }); } catch (e) { /* best-effort */ }
+      }
+    }
+    // Current turn.
+    if (combat?.started && data.current_turn) {
+      const cb = combatantByName(combat, data.current_turn);
+      const turnIdx = cb ? (combat.turns || []).findIndex((t) => t.id === cb.id) : -1;
+      if (turnIdx >= 0 && turnIdx !== combat.turn) { try { await combat.update({ turn: turnIdx }); } catch (e) { /* best-effort */ } }
+    }
+    // Hidden HP: keep NPC bars GM-only when MythrOS says HP isn't visible.
+    if (data.hp_visible === false && combat) await hideMonsterHp(combat);
+  } catch (err) {
+    console.warn(`${MOD} | applyDiscordCombat failed`, err);
+  } finally {
+    _applyingDiscord = false;
+  }
+}
 
 // ── Foundry → Discord ─────────────────────────────────────────────────────────
 Hooks.on("createChatMessage", async (message) => {
@@ -453,6 +519,8 @@ function connectSocket() {
 
       if (data.origin !== "discord") return;
       if (!isPrimaryGM()) return; // only the canonical GM injects, once
+      // Phase B2: a combat snapshot drives Foundry tokens/turn, not the chat log.
+      if (data.kind === "combat") { await applyDiscordCombat(data); return; }
       const speaker = (data.speaker || "Discord").slice(0, 80);
       // flags.mythros.relayed → the outbound hook will skip this, no bounce-back.
       await ChatMessage.create({

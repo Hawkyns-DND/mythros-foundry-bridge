@@ -48,16 +48,21 @@ Layered on top of the dnd5e combat engine — it does **not** replace it. Toggle
 | **Turn-prep declarations** | When the active turn lands on a PC you own, you're prompted to declare movement / action / bonus / target / notes. The declaration posts to chat and is stored on the combatant. |
 | **Permadeath** | A PC that reaches **3 death-save failures** is locked dead — a death status overlay is applied and a death card posts. Death is permanent. |
 
-### Combat mirror (Phase B1 — Foundry → Discord)
+### Combat mirror (two-way)
 
-When you run a fight in Foundry, it **mirrors into the live Discord combat tracker**: starting
-combat seeds the bot tracker, and turn advances, HP changes, death saves, turn-prep
-declarations, and permadeath flow into the in-game channel. Permadeath **writes through** to
-MythrOS (the character is marked dead in the bot). This needs the bridge secret configured and
-the GM to have a live MythrOS session.
+The Foundry fight and the live Discord combat tracker stay in sync **both directions**:
 
-> Phase B2 (in progress) adds the reverse, actionable direction — Discord buttons (damage /
-> heal / death-save / next / turn-prep) push back into Foundry tokens and turn order.
+- **Foundry → Discord** — starting combat seeds the bot tracker; turn advances, HP changes,
+  death saves, turn-prep declarations, and permadeath flow into the in-game channel.
+  Permadeath **writes through** to MythrOS (the character is marked dead in the bot).
+- **Discord → Foundry** — when the table acts on Discord (the combat buttons: damage / heal /
+  death-save / next turn / turn-prep), a state snapshot pushes back into Foundry: token HP,
+  death saves, conditions, defeated markers, current turn, and hidden-HP all update.
+  PCs match by their MythrOS `characterId`; NPCs match by name.
+
+Echo-safe: changes the bridge applies to Foundry are flagged so they don't bounce back, and
+combat snapshots ride the same per-guild-secret socket as chat. Needs the bridge secret
+configured and the GM to have a live MythrOS session.
 
 ---
 
