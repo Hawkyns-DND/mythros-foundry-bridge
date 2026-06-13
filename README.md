@@ -48,8 +48,16 @@ Layered on top of the dnd5e combat engine — it does **not** replace it. Toggle
 | **Turn-prep declarations** | When the active turn lands on a PC you own, you're prompted to declare movement / action / bonus / target / notes. The declaration posts to chat and is stored on the combatant. |
 | **Permadeath** | A PC that reaches **3 death-save failures** is locked dead — a death status overlay is applied and a death card posts. Death is permanent. |
 
-> Phase A is **Foundry-local**. Phase B wires turn-prep, HP, and permadeath two-way to a live
-> Discord combat tracker so the table can act from either side.
+### Combat mirror (Phase B1 — Foundry → Discord)
+
+When you run a fight in Foundry, it **mirrors into the live Discord combat tracker**: starting
+combat seeds the bot tracker, and turn advances, HP changes, death saves, turn-prep
+declarations, and permadeath flow into the in-game channel. Permadeath **writes through** to
+MythrOS (the character is marked dead in the bot). This needs the bridge secret configured and
+the GM to have a live MythrOS session.
+
+> Phase B2 (in progress) adds the reverse, actionable direction — Discord buttons (damage /
+> heal / death-save / next / turn-prep) push back into Foundry tokens and turn order.
 
 ---
 

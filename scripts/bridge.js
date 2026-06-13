@@ -254,9 +254,79 @@ Hooks.on("updateActor", async (actor, changes) => {
       speaker: { alias: "The Ash Remembers" },
       content: `<div class="mythros-permadeath"><h3>☠️ ${actor.name} has fallen.</h3><p>Three death-save failures. The Ash takes them — this death is permanent.</p></div>`,
     });
+    // Phase B: write the death through to MythrOS (permadeath in the bot DB).
+    postCombat("permadeath", { name: actor.name });
   } catch (err) {
     console.warn(`${MOD} | permadeath lock failed`, err);
   }
+});
+
+// ── Phase B1 — combat sync (Foundry → MythrOS) ─────────────────────────────────
+// The primary GM mirrors the Foundry fight into the bot's live combat tracker by
+// POSTing typed events. The bot drives combat_service + posts a line to the in-game
+// channel. Combat state only — economy stays MythrOS-authoritative.
+
+async function postCombat(event, payload) {
+  if (!combatEnabled() || !isPrimaryGM()) return;
+  const secret = S("sharedSecret");
+  const gmId = S("gmDiscordId");
+  const base = (S("webBaseUrl") || "").replace(/\/+$/, "");
+  if (!secret || !gmId || !base) return;
+  try {
+    await fetch(`${base}/api/v1/foundry/combat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${secret}` },
+      body: JSON.stringify({ gm_id: Number(gmId), event, payload }),
+    });
+  } catch (err) {
+    console.warn(`${MOD} | combat sync POST failed`, event, err);
+  }
+}
+
+/** Serialize a combat's combatants for the bot tracker (name/init/hp/ac/is_player). */
+function combatantsPayload(combat) {
+  const out = [];
+  for (const c of combat?.combatants ?? []) {
+    const a = c.actor;
+    if (!a) continue;
+    const hp = a.system?.attributes?.hp || {};
+    out.push({
+      name: c.name,
+      initiative: Number(c.initiative ?? 0) || 0,
+      hp_max: hp.max ?? null,
+      is_player: a.type === "character",
+      ac: a.system?.attributes?.ac?.value ?? null,
+    });
+  }
+  return out;
+}
+
+// Combat start → mirror the tracker.
+Hooks.on("combatStart", (combat) =>
+  postCombat("combat_start", { combatants: combatantsPayload(combat), hide_npc_hp: S("hideNpcHp") }));
+
+// Turn / round advance → advance the bot tracker.
+Hooks.on("updateCombat", (combat, changes) => {
+  if (changes.turn === undefined && changes.round === undefined) return;
+  postCombat("turn_advance", { name: combat.combatant?.name || null });
+});
+
+// HP change on a combatant in the active fight → mirror it.
+Hooks.on("updateActor", (actor, changes) => {
+  if (changes.system?.attributes?.hp === undefined) return;
+  const combat = game.combats?.active;
+  if (!combat?.started) return;
+  const inFight = (combat.combatants ?? []).find((c) => c.actor?.id === actor.id);
+  if (!inFight) return;
+  const hp = actor.system?.attributes?.hp || {};
+  postCombat("hp", { name: inFight.name, hp_current: hp.value ?? null, hp_max: hp.max ?? null });
+});
+
+// A player's turn-prep declaration (the flag set in Phase A) → relay to Discord.
+Hooks.on("updateCombatant", (combatant, changes) => {
+  const prep = changes.flags?.mythros?.turnPrep;
+  if (!prep) return;
+  postCombat("turn_prep", { name: combatant.name, user_id: 0, ...prep });
 });
 
 // ── Foundry → Discord ─────────────────────────────────────────────────────────
