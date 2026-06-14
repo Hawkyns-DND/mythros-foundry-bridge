@@ -339,6 +339,12 @@ Hooks.on("updateCombatant", (combatant, changes) => {
   postCombat("turn_prep", { name: combatant.name, user_id: 0, ...prep });
 });
 
+// Combat ends in Foundry → close the bot tracker (and drop its action buttons).
+Hooks.on("deleteCombat", () => {
+  if (_applyingDiscord) return;
+  postCombat("combat_end", {});
+});
+
 // ── Phase B2 — apply Discord-driven combat state to Foundry ────────────────────
 // A snapshot (combatants + current turn + hp_visible) arrives over the WS when the
 // table acts on the Discord side; the primary GM applies it to tokens + turn order.
@@ -375,8 +381,18 @@ async function applyDiscordCombat(data) {
           if (c.death_successes !== null && c.death_successes !== undefined) update["system.attributes.death.success"] = c.death_successes;
         }
         if (Object.keys(update).length) { try { await actor.update(update); } catch (e) { /* best-effort */ } }
+        // Permadeath visual for a PC that died on the Discord side — our own
+        // permadeath hook is suppressed by _applyingDiscord, so apply it here.
+        if (c.is_player && c.dead && !actor.getFlag(MOD, "permadead")) {
+          try {
+            await actor.setFlag(MOD, "permadead", true);
+            await actor.toggleStatusEffect?.("dead", { active: true, overlay: true });
+          } catch (e) { /* best-effort */ }
+        }
       }
-      if (combatant && c.dead && !combatant.isDefeated) {
+      // Defeated marker for a fallen combatant. NPCs are 'downed' at 0 HP (never
+      // 'dead', which is PC-only), so key off either.
+      if (combatant && (c.downed || c.dead) && !combatant.isDefeated) {
         try { await combatant.update({ defeated: true }); } catch (e) { /* best-effort */ }
       }
     }
