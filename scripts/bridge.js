@@ -358,10 +358,47 @@ Hooks.on("createCombatant", (combatant) => {
   });
 });
 
-// Combat ends in Foundry → close the bot tracker (and drop its action buttons).
-Hooks.on("deleteCombat", () => {
+/** POST the defeated NPCs to MythrOS so the bot rolls a claimable loot sheet. */
+async function postLoot(encounters) {
+  if (!combatEnabled() || !isPrimaryGM()) return;
+  const secret = S("sharedSecret");
+  const gmId = S("gmDiscordId");
+  const base = (S("webBaseUrl") || "").replace(/\/+$/, "");
+  if (!secret || !gmId || !base) return;
+  try {
+    await fetch(`${base}/api/v1/foundry/loot`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${secret}` },
+      body: JSON.stringify({ gm_id: Number(gmId), encounters }),
+    });
+  } catch (err) {
+    console.warn(`${MOD} | loot POST failed`, err);
+  }
+}
+
+/** Defeated non-PC combatants grouped by name → [{name, cr, count}] for loot. */
+function lootPayload(combat) {
+  const groups = new Map();
+  for (const c of combat?.combatants ?? []) {
+    const a = c.actor;
+    if (!a || a.type === "character") continue;
+    const hp = a.system?.attributes?.hp?.value;
+    const defeated = c.isDefeated || c.defeated || (hp !== undefined && hp !== null && hp <= 0);
+    if (!defeated) continue;
+    const g = groups.get(a.name) || { name: a.name, cr: Number(a.system?.details?.cr ?? 0) || 0, count: 0 };
+    g.count += 1;
+    groups.set(a.name, g);
+  }
+  return [...groups.values()];
+}
+
+// Combat ends in Foundry → close the bot tracker (and drop its action buttons), and
+// roll a claimable loot sheet from the defeated NPCs (the bot owns loot).
+Hooks.on("deleteCombat", (combat) => {
   if (_applyingDiscord) return;
   postCombat("combat_end", {});
+  const loot = lootPayload(combat);
+  if (loot.length) postLoot(loot);
 });
 
 // ── Phase B2 — apply Discord-driven combat state to Foundry ────────────────────
