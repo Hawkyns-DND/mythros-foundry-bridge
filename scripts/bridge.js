@@ -87,7 +87,25 @@ Hooks.once("init", () => {
     hint: "When a combat starts, set non-PC token bars to GM-only so players can't read monster HP.",
     scope: "world", config: true, type: Boolean, default: true,
   });
+  game.settings.register(MOD, "showBrand", {
+    name: "Show KoTTrpg mark",
+    hint: "A small breathing KoTTrpg wordmark in the top-left corner. Per-player; turn it off here.",
+    scope: "client", config: true, type: Boolean, default: true,
+    onChange: () => injectBrand(),
+  });
 });
+
+/** Pin (or remove) the breathing KoTTrpg wordmark in the top-left. */
+function injectBrand() {
+  const existing = document.getElementById("kottrpg-brand");
+  if (!S("showBrand")) { existing?.remove(); return; }
+  if (existing) return;
+  const el = document.createElement("div");
+  el.id = "kottrpg-brand";
+  el.innerHTML = `Ko<span class="kott-accent">TT</span>rpg`;
+  el.title = "KoTTrpg / Ashreach";
+  document.body.appendChild(el);
+}
 
 // ── Phase 2 live sync ─────────────────────────────────────────────────────────
 // Combat state (HP / temp / death saves) is pushed Foundry → MythrOS as it changes;
@@ -616,4 +634,5 @@ function scheduleReconnect() {
 
 Hooks.once("ready", () => {
   if (game.user?.isGM) connectSocket();
+  injectBrand();   // cosmetic, every client
 });
