@@ -339,6 +339,25 @@ Hooks.on("updateCombatant", (combatant, changes) => {
   postCombat("turn_prep", { name: combatant.name, user_id: 0, ...prep });
 });
 
+// A combatant added to an already-running fight → mirror it as a reinforcement.
+// (Initial combatants are added before "Begin Combat", so combat.started is false
+// then and combatStart handles them — this fires only for true mid-fight arrivals.)
+Hooks.on("createCombatant", (combatant) => {
+  if (_applyingDiscord) return;
+  if (!combatant.combat?.started) return;
+  const a = combatant.actor;
+  const hp = a?.system?.attributes?.hp || {};
+  postCombat("combatant_add", {
+    combatant: {
+      name: combatant.name,
+      initiative: Number(combatant.initiative ?? 0) || 0,
+      hp_max: hp.max ?? null,
+      is_player: a?.type === "character",
+      ac: a?.system?.attributes?.ac?.value ?? null,
+    },
+  });
+});
+
 // Combat ends in Foundry → close the bot tracker (and drop its action buttons).
 Hooks.on("deleteCombat", () => {
   if (_applyingDiscord) return;
