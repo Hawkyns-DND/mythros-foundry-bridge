@@ -576,10 +576,13 @@ function connectSocket() {
   if (!secret || !gmId || !base) return;
 
   const wsBase = base.replace(/^http/, "ws");
-  const url = `${wsBase}/api/v1/foundry/socket?secret=${encodeURIComponent(secret)}&gm=${encodeURIComponent(gmId)}`;
+  // The secret rides the WebSocket subprotocol (a browser WS can't set headers, but it
+  // can offer subprotocols) so it never appears in the URL/query — and never in logs.
+  // Only the gm id (not a secret) stays in the query string.
+  const url = `${wsBase}/api/v1/foundry/socket?gm=${encodeURIComponent(gmId)}`;
 
   try {
-    _ws = new WebSocket(url);
+    _ws = new WebSocket(url, ["mythros-bridge.v1", secret]);
   } catch (err) {
     console.warn(`${MOD} | socket open failed`, err);
     scheduleReconnect();
