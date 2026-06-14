@@ -1,8 +1,8 @@
 {
   "id": "mythros-foundry-bridge",
   "title": "MythrOS Foundry Bridge",
-  "description": "MythrOS ⇄ Foundry VTT (dnd5e) bridge for KoTT.gg / Ashreach: two-way chat + dice-roll relay AND account provisioning (auto-create Foundry accounts + imported characters, role sync, password reset) over one socket. D&D 5e only.",
-  "version": "0.2.0",
+  "description": "MythrOS ⇄ Foundry VTT (dnd5e) bridge for KoTT.gg / Ashreach: two-way chat + dice-roll relay, HP/economy live sync, account provisioning, MythrOS combat augmentation (hidden monster HP, async turn-prep declarations, permadeath), AND a fully two-way combat mirror — a Foundry fight mirrors into the live Discord combat tracker and Discord-side combat actions push back into Foundry tokens + turn order — over one socket. D&D 5e only.",
+  "version": "0.7.1",
   "compatibility": {
     "minimum": "12",
     "verified": "13",
@@ -13,6 +13,9 @@
   ],
   "esmodules": [
     "scripts/bridge.js"
+  ],
+  "styles": [
+    "styles/bridge.css"
   ],
   "relationships": {
     "systems": [

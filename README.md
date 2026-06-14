@@ -37,6 +37,35 @@ GM** relays/injects (so multiple open clients don't multiply a message).
 
 ---
 
+## Combat augmentation (MythrOS combat feel)
+
+Layered on top of the dnd5e combat engine — it does **not** replace it. Toggle with the
+**MythrOS combat augmentation** master setting.
+
+| Feature | What it does |
+|---------|--------------|
+| **Hidden monster HP** | When combat begins, non-PC token bars are set GM-only so players can't read monster HP. (Setting: *Hide monster HP from players*.) |
+| **Turn-prep declarations** | When the active turn lands on a PC you own, you're prompted to declare movement / action / bonus / target / notes. The declaration posts to chat and is stored on the combatant. |
+| **Permadeath** | A PC that reaches **3 death-save failures** is locked dead — a death status overlay is applied and a death card posts. Death is permanent. |
+
+### Combat mirror (two-way)
+
+The Foundry fight and the live Discord combat tracker stay in sync **both directions**:
+
+- **Foundry → Discord** — starting combat seeds the bot tracker; turn advances, HP changes,
+  death saves, turn-prep declarations, and permadeath flow into the in-game channel.
+  Permadeath **writes through** to MythrOS (the character is marked dead in the bot).
+- **Discord → Foundry** — when the table acts on Discord (the combat buttons: damage / heal /
+  death-save / next turn / turn-prep), a state snapshot pushes back into Foundry: token HP,
+  death saves, conditions, defeated markers, current turn, and hidden-HP all update.
+  PCs match by their MythrOS `characterId`; NPCs match by name.
+
+Echo-safe: changes the bridge applies to Foundry are flagged so they don't bounce back, and
+combat snapshots ride the same per-guild-secret socket as chat. Needs the bridge secret
+configured and the GM to have a live MythrOS session.
+
+---
+
 ## Install
 
 1. In Foundry: **Add-on Modules → Install Module**, paste the manifest URL:
@@ -50,6 +79,8 @@ GM** relays/injects (so multiple open clients don't multiply a message).
    | Bridge shared secret | the value of `FOUNDRY_BRIDGE_SECRET` set on the bot/web |
    | GM Discord user ID | the Discord user id of the GM running sessions |
    | Enable relay / rolls / chat | on |
+   | MythrOS combat augmentation | on (hidden HP / turn-prep / permadeath) |
+   | Hide monster HP from players | on |
 
 The relay only fires while that GM has a **live MythrOS session** (provisioned /
 active / campfire). Foundry→Discord lands in that session's in-game channel; if the

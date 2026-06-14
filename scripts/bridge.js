@@ -1,5 +1,9 @@
 /**
- * MythrOS Foundry Bridge — Phase 3 relay (client/GM-browser side).
+ * MythrOS Foundry Bridge — relay + sync + combat augmentation (client/GM-browser side).
+ *
+ * Phase A combat augmentation (this build): hidden monster HP, async turn-prep
+ * declarations, and permadeath, layered on the dnd5e engine (Foundry-local; Phase B
+ * wires these two-way to Discord).
  *
  * Mirrors chat + dice rolls between this Foundry world and the MythrOS Discord
  * session in BOTH directions:
@@ -68,7 +72,418 @@ Hooks.once("init", () => {
     name: "Relay chat messages",
     scope: "world", config: true, type: Boolean, default: true,
   });
+  game.settings.register(MOD, "syncEconomy", {
+    name: "Sync economy from MythrOS",
+    hint: "On session start, pull each bridged actor's gold from MythrOS (the economy authority).",
+    scope: "world", config: true, type: Boolean, default: true,
+  });
+  game.settings.register(MOD, "combatModule", {
+    name: "MythrOS combat augmentation",
+    hint: "Layer the MythrOS combat feel on dnd5e: hidden monster HP, turn-prep declarations, and permadeath. Master switch for the combat features.",
+    scope: "world", config: true, type: Boolean, default: true,
+  });
+  game.settings.register(MOD, "hideNpcHp", {
+    name: "Hide monster HP from players",
+    hint: "When a combat starts, set non-PC token bars to GM-only so players can't read monster HP.",
+    scope: "world", config: true, type: Boolean, default: true,
+  });
+  game.settings.register(MOD, "showBrand", {
+    name: "Show KoTTrpg mark",
+    hint: "A small breathing KoTTrpg wordmark in the top-left corner. Per-player; turn it off here.",
+    scope: "client", config: true, type: Boolean, default: true,
+    onChange: () => injectBrand(),
+  });
 });
+
+/** Pin (or remove) the breathing KoTTrpg wordmark in the top-left. */
+function injectBrand() {
+  const existing = document.getElementById("kottrpg-brand");
+  if (!S("showBrand")) { existing?.remove(); return; }
+  if (existing) return;
+  const el = document.createElement("div");
+  el.id = "kottrpg-brand";
+  el.innerHTML = `Ko<span class="kott-accent">TT</span>rpg`;
+  el.title = "KoTTrpg / Ashreach";
+  document.body.appendChild(el);
+}
+
+// ── Phase 2 live sync ─────────────────────────────────────────────────────────
+// Combat state (HP / temp / death saves) is pushed Foundry → MythrOS as it changes;
+// economy (gold) is pulled MythrOS → Foundry on session start. Only the primary GM
+// acts, and only for actors carrying flags.mythros.characterId.
+
+// Foundry → MythrOS: HP / death-save changes.
+Hooks.on("updateActor", async (actor, changes) => {
+  try {
+    if (!S("relayEnabled") || !isPrimaryGM()) return;
+    const cid = actor.flags?.mythros?.characterId;
+    if (!cid) return;
+    // Only push when an HP or death-save field actually changed.
+    const hpChanged = changes.system?.attributes?.hp !== undefined;
+    const deathChanged = changes.system?.attributes?.death !== undefined;
+    if (!hpChanged && !deathChanged) return;
+
+    const secret = S("sharedSecret");
+    const base = (S("webBaseUrl") || "").replace(/\/+$/, "");
+    if (!secret || !base) return;
+
+    const attrs = actor.system?.attributes || {};
+    await fetch(`${base}/api/v1/foundry/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${secret}` },
+      body: JSON.stringify({
+        character_id: Number(cid),
+        hp_current: attrs.hp?.value ?? null,
+        hp_temp: attrs.hp?.temp ?? null,
+        death_successes: attrs.death?.success ?? null,
+        death_failures: attrs.death?.failure ?? null,
+      }),
+    });
+  } catch (err) {
+    console.warn(`${MOD} | combat sync (Foundry→MythrOS) failed`, err);
+  }
+});
+
+// MythrOS → Foundry: pull authoritative gold for every bridged actor on session start.
+async function pullEconomy() {
+  if (!isPrimaryGM() || !S("syncEconomy")) return;
+  const secret = S("sharedSecret");
+  const base = (S("webBaseUrl") || "").replace(/\/+$/, "");
+  if (!secret || !base) return;
+  for (const actor of game.actors) {
+    const cid = actor.flags?.mythros?.characterId;
+    if (!cid) continue;
+    try {
+      const res = await fetch(`${base}/api/v1/foundry/actor/${Number(cid)}`, {
+        headers: { "Authorization": `Bearer ${secret}` },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const gp = data?.system?.currency?.gp;
+      // Setting currency fires updateActor, but our hook above only pushes on
+      // HP/death changes, so this never loops back into a sync.
+      if (typeof gp === "number" && gp !== actor.system?.currency?.gp) {
+        await actor.update({ "system.currency.gp": gp });
+      }
+    } catch (err) {
+      console.warn(`${MOD} | economy pull failed for actor`, cid, err);
+    }
+  }
+}
+Hooks.once("ready", () => { if (game.user?.isGM) pullEconomy(); });
+
+// ── Phase A — MythrOS combat augmentation ──────────────────────────────────────
+// Hidden monster HP, async turn-prep declarations, and permadeath, layered on the
+// dnd5e engine. Foundry-local in Phase A; Phase B syncs these to Discord.
+
+const DEATH_FAILS_FATAL = 3;
+
+// True while we're applying a Discord-driven snapshot to Foundry, so our own
+// outbound combat hooks skip those changes (no echo back to MythrOS).
+let _applyingDiscord = false;
+
+function combatEnabled() {
+  return S("combatModule");
+}
+
+/** Hide non-PC token HP bars from players when a combat begins (primary GM only). */
+async function hideMonsterHp(combat) {
+  if (!combatEnabled() || !S("hideNpcHp") || !isPrimaryGM()) return;
+  const ownerOnly = CONST.TOKEN_DISPLAY_MODES.OWNER;
+  for (const c of combat?.combatants ?? []) {
+    const token = c.token;   // TokenDocument
+    const actor = c.actor;
+    if (!token || !actor || actor.type === "character") continue;
+    if (token.displayBars === ownerOnly) continue;
+    try { await token.update({ displayBars: ownerOnly }); } catch (e) { /* best-effort */ }
+  }
+}
+
+Hooks.on("combatStart", (combat) => hideMonsterHp(combat));
+Hooks.on("createCombat", (combat) => hideMonsterHp(combat));
+
+// Turn-prep: when the active turn lands on a PC you own, prompt a declaration.
+let _lastPrepKey = null;
+Hooks.on("updateCombat", async (combat, changes) => {
+  try {
+    if (!combatEnabled()) return;
+    if (changes.turn === undefined && changes.round === undefined) return;
+    const c = combat.combatant;
+    const actor = c?.actor;
+    if (!actor || actor.type !== "character" || !actor.isOwner) return;
+    if (game.user.isGM) return; // players declare; the GM runs the table
+    const key = `${combat.id}:${combat.round}:${combat.turn}`;
+    if (_lastPrepKey === key) return; // one prompt per turn
+    _lastPrepKey = key;
+    await promptTurnPrep(combat, c);
+  } catch (err) {
+    console.warn(`${MOD} | turn-prep prompt failed`, err);
+  }
+});
+
+async function promptTurnPrep(combat, combatant) {
+  const field = (name, label, ph) =>
+    `<div class="form-group"><label>${label}</label><input type="text" name="${name}" placeholder="${ph}"/></div>`;
+  const content = `
+    <p>It's <strong>${combatant.name}</strong>'s turn. Declare your intent (optional):</p>
+    ${field("movement", "Movement", "where you move")}
+    ${field("action", "Action", "attack / cast / dash …")}
+    ${field("bonus_action", "Bonus action", "off-hand / spell …")}
+    ${field("target", "Target", "who / what")}
+    ${field("notes", "Notes", "anything else")}`;
+  const prep = await foundry.applications.api.DialogV2.prompt({
+    window: { title: "Declare your turn", icon: "fa-solid fa-clipboard-list" },
+    content,
+    ok: { label: "Declare", callback: (_e, btn) => {
+      const f = btn.form;
+      return {
+        movement: f.movement.value.trim(),
+        action: f.action.value.trim(),
+        bonus_action: f.bonus_action.value.trim(),
+        target: f.target.value.trim(),
+        notes: f.notes.value.trim(),
+      };
+    } },
+  }).catch(() => null);
+  if (!prep) return;
+  try { await combatant.setFlag(MOD, "turnPrep", prep); } catch (e) { /* best-effort */ }
+  const lines = [
+    prep.movement && `<strong>Move:</strong> ${prep.movement}`,
+    prep.action && `<strong>Action:</strong> ${prep.action}`,
+    prep.bonus_action && `<strong>Bonus:</strong> ${prep.bonus_action}`,
+    prep.target && `<strong>Target:</strong> ${prep.target}`,
+    prep.notes && `<strong>Notes:</strong> ${prep.notes}`,
+  ].filter(Boolean);
+  if (!lines.length) return;
+  await ChatMessage.create({
+    speaker: { alias: `${combatant.name} — turn declaration` },
+    content: `<div class="mythros-turn-prep">${lines.join("<br>")}</div>`,
+  });
+}
+
+// Permadeath: a bridged PC at 3 death-save failures is locked dead (Foundry-local in A).
+Hooks.on("updateActor", async (actor, changes) => {
+  try {
+    if (_applyingDiscord) return;
+    if (!combatEnabled() || !isPrimaryGM()) return;
+    if (changes.system?.attributes?.death === undefined) return;
+    if (actor.type !== "character") return;
+    const fails = actor.system?.attributes?.death?.failure ?? 0;
+    if (fails < DEATH_FAILS_FATAL) return;
+    if (actor.getFlag(MOD, "permadead")) return; // already handled
+    await actor.setFlag(MOD, "permadead", true);
+    try { await actor.toggleStatusEffect?.("dead", { active: true, overlay: true }); } catch (e) { /* best-effort */ }
+    await ChatMessage.create({
+      speaker: { alias: "The Ash Remembers" },
+      content: `<div class="mythros-permadeath"><h3>☠️ ${actor.name} has fallen.</h3><p>Three death-save failures. The Ash takes them — this death is permanent.</p></div>`,
+    });
+    // Phase B: write the death through to MythrOS (permadeath in the bot DB).
+    postCombat("permadeath", { name: actor.name });
+  } catch (err) {
+    console.warn(`${MOD} | permadeath lock failed`, err);
+  }
+});
+
+// ── Phase B1 — combat sync (Foundry → MythrOS) ─────────────────────────────────
+// The primary GM mirrors the Foundry fight into the bot's live combat tracker by
+// POSTing typed events. The bot drives combat_service + posts a line to the in-game
+// channel. Combat state only — economy stays MythrOS-authoritative.
+
+async function postCombat(event, payload) {
+  if (!combatEnabled() || !isPrimaryGM()) return;
+  const secret = S("sharedSecret");
+  const gmId = S("gmDiscordId");
+  const base = (S("webBaseUrl") || "").replace(/\/+$/, "");
+  if (!secret || !gmId || !base) return;
+  try {
+    await fetch(`${base}/api/v1/foundry/combat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${secret}` },
+      body: JSON.stringify({ gm_id: Number(gmId), event, payload }),
+    });
+  } catch (err) {
+    console.warn(`${MOD} | combat sync POST failed`, event, err);
+  }
+}
+
+/** Serialize a combat's combatants for the bot tracker (name/init/hp/ac/is_player). */
+function combatantsPayload(combat) {
+  const out = [];
+  for (const c of combat?.combatants ?? []) {
+    const a = c.actor;
+    if (!a) continue;
+    const hp = a.system?.attributes?.hp || {};
+    out.push({
+      name: c.name,
+      initiative: Number(c.initiative ?? 0) || 0,
+      hp_max: hp.max ?? null,
+      is_player: a.type === "character",
+      ac: a.system?.attributes?.ac?.value ?? null,
+    });
+  }
+  return out;
+}
+
+// Combat start → mirror the tracker.
+Hooks.on("combatStart", (combat) => {
+  if (_applyingDiscord) return;
+  postCombat("combat_start", { combatants: combatantsPayload(combat), hide_npc_hp: S("hideNpcHp") });
+});
+
+// Turn / round advance → advance the bot tracker.
+Hooks.on("updateCombat", (combat, changes) => {
+  if (_applyingDiscord) return;
+  if (changes.turn === undefined && changes.round === undefined) return;
+  postCombat("turn_advance", { name: combat.combatant?.name || null });
+});
+
+// HP change on a combatant in the active fight → mirror it.
+Hooks.on("updateActor", (actor, changes) => {
+  if (_applyingDiscord) return;
+  if (changes.system?.attributes?.hp === undefined) return;
+  const combat = game.combats?.active;
+  if (!combat?.started) return;
+  const inFight = (combat.combatants ?? []).find((c) => c.actor?.id === actor.id);
+  if (!inFight) return;
+  const hp = actor.system?.attributes?.hp || {};
+  postCombat("hp", { name: inFight.name, hp_current: hp.value ?? null, hp_max: hp.max ?? null });
+});
+
+// A player's turn-prep declaration (the flag set in Phase A) → relay to Discord.
+Hooks.on("updateCombatant", (combatant, changes) => {
+  if (_applyingDiscord) return;
+  const prep = changes.flags?.mythros?.turnPrep;
+  if (!prep) return;
+  postCombat("turn_prep", { name: combatant.name, user_id: 0, ...prep });
+});
+
+// A combatant added to an already-running fight → mirror it as a reinforcement.
+// (Initial combatants are added before "Begin Combat", so combat.started is false
+// then and combatStart handles them — this fires only for true mid-fight arrivals.)
+Hooks.on("createCombatant", (combatant) => {
+  if (_applyingDiscord) return;
+  if (!combatant.combat?.started) return;
+  const a = combatant.actor;
+  const hp = a?.system?.attributes?.hp || {};
+  postCombat("combatant_add", {
+    combatant: {
+      name: combatant.name,
+      initiative: Number(combatant.initiative ?? 0) || 0,
+      hp_max: hp.max ?? null,
+      is_player: a?.type === "character",
+      ac: a?.system?.attributes?.ac?.value ?? null,
+    },
+  });
+});
+
+/** POST the defeated NPCs to MythrOS so the bot rolls a claimable loot sheet. */
+async function postLoot(encounters) {
+  if (!combatEnabled() || !isPrimaryGM()) return;
+  const secret = S("sharedSecret");
+  const gmId = S("gmDiscordId");
+  const base = (S("webBaseUrl") || "").replace(/\/+$/, "");
+  if (!secret || !gmId || !base) return;
+  try {
+    await fetch(`${base}/api/v1/foundry/loot`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${secret}` },
+      body: JSON.stringify({ gm_id: Number(gmId), encounters }),
+    });
+  } catch (err) {
+    console.warn(`${MOD} | loot POST failed`, err);
+  }
+}
+
+/** Defeated non-PC combatants grouped by name → [{name, cr, count}] for loot. */
+function lootPayload(combat) {
+  const groups = new Map();
+  for (const c of combat?.combatants ?? []) {
+    const a = c.actor;
+    if (!a || a.type === "character") continue;
+    const hp = a.system?.attributes?.hp?.value;
+    const defeated = c.isDefeated || c.defeated || (hp !== undefined && hp !== null && hp <= 0);
+    if (!defeated) continue;
+    const g = groups.get(a.name) || { name: a.name, cr: Number(a.system?.details?.cr ?? 0) || 0, count: 0 };
+    g.count += 1;
+    groups.set(a.name, g);
+  }
+  return [...groups.values()];
+}
+
+// Combat ends in Foundry → close the bot tracker (and drop its action buttons), and
+// roll a claimable loot sheet from the defeated NPCs (the bot owns loot).
+Hooks.on("deleteCombat", (combat) => {
+  if (_applyingDiscord) return;
+  postCombat("combat_end", {});
+  const loot = lootPayload(combat);
+  if (loot.length) postLoot(loot);
+});
+
+// ── Phase B2 — apply Discord-driven combat state to Foundry ────────────────────
+// A snapshot (combatants + current turn + hp_visible) arrives over the WS when the
+// table acts on the Discord side; the primary GM applies it to tokens + turn order.
+
+function combatantByName(combat, name) {
+  return combat?.combatants?.find((cb) => cb.name === name) || null;
+}
+
+/** Resolve the Foundry actor for a snapshot combatant: the in-combat token actor
+ *  first (handles unlinked NPCs), then a bridged PC by characterId, then by name. */
+function actorForSnapshot(combat, c) {
+  const cb = combatantByName(combat, c.name);
+  if (cb?.actor) return { actor: cb.actor, combatant: cb };
+  if (c.character_id) {
+    const a = game.actors.find((x) => Number(x.flags?.mythros?.characterId) === Number(c.character_id));
+    if (a) return { actor: a, combatant: null };
+  }
+  return { actor: game.actors.getName?.(c.name) || null, combatant: null };
+}
+
+async function applyDiscordCombat(data) {
+  if (!combatEnabled() || !isPrimaryGM()) return;
+  _applyingDiscord = true;
+  try {
+    const combat = game.combats?.active;
+    for (const c of data.combatants || []) {
+      const { actor, combatant } = actorForSnapshot(combat, c);
+      if (actor) {
+        const update = {};
+        if (c.hp_current !== null && c.hp_current !== undefined) update["system.attributes.hp.value"] = c.hp_current;
+        if (c.hp_max !== null && c.hp_max !== undefined) update["system.attributes.hp.max"] = c.hp_max;
+        if (c.is_player) {
+          if (c.death_failures !== null && c.death_failures !== undefined) update["system.attributes.death.failure"] = c.death_failures;
+          if (c.death_successes !== null && c.death_successes !== undefined) update["system.attributes.death.success"] = c.death_successes;
+        }
+        if (Object.keys(update).length) { try { await actor.update(update); } catch (e) { /* best-effort */ } }
+        // Permadeath visual for a PC that died on the Discord side — our own
+        // permadeath hook is suppressed by _applyingDiscord, so apply it here.
+        if (c.is_player && c.dead && !actor.getFlag(MOD, "permadead")) {
+          try {
+            await actor.setFlag(MOD, "permadead", true);
+            await actor.toggleStatusEffect?.("dead", { active: true, overlay: true });
+          } catch (e) { /* best-effort */ }
+        }
+      }
+      // Defeated marker for a fallen combatant. NPCs are 'downed' at 0 HP (never
+      // 'dead', which is PC-only), so key off either.
+      if (combatant && (c.downed || c.dead) && !combatant.isDefeated) {
+        try { await combatant.update({ defeated: true }); } catch (e) { /* best-effort */ }
+      }
+    }
+    // Current turn.
+    if (combat?.started && data.current_turn) {
+      const cb = combatantByName(combat, data.current_turn);
+      const turnIdx = cb ? (combat.turns || []).findIndex((t) => t.id === cb.id) : -1;
+      if (turnIdx >= 0 && turnIdx !== combat.turn) { try { await combat.update({ turn: turnIdx }); } catch (e) { /* best-effort */ } }
+    }
+    // Hidden HP: keep NPC bars GM-only when MythrOS says HP isn't visible.
+    if (data.hp_visible === false && combat) await hideMonsterHp(combat);
+  } catch (err) {
+    console.warn(`${MOD} | applyDiscordCombat failed`, err);
+  } finally {
+    _applyingDiscord = false;
+  }
+}
 
 // ── Foundry → Discord ─────────────────────────────────────────────────────────
 Hooks.on("createChatMessage", async (message) => {
@@ -194,6 +609,8 @@ function connectSocket() {
 
       if (data.origin !== "discord") return;
       if (!isPrimaryGM()) return; // only the canonical GM injects, once
+      // Phase B2: a combat snapshot drives Foundry tokens/turn, not the chat log.
+      if (data.kind === "combat") { await applyDiscordCombat(data); return; }
       const speaker = (data.speaker || "Discord").slice(0, 80);
       // flags.mythros.relayed → the outbound hook will skip this, no bounce-back.
       await ChatMessage.create({
@@ -217,4 +634,5 @@ function scheduleReconnect() {
 
 Hooks.once("ready", () => {
   if (game.user?.isGM) connectSocket();
+  injectBrand();   // cosmetic, every client
 });

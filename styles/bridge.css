@@ -1,0 +1,40 @@
+/* KoTTrpg brand mark — a quiet, breathing wordmark pinned top-left. */
+#kottrpg-brand {
+  position: fixed;
+  top: 6px;
+  left: 14px;
+  z-index: 70;                 /* above the canvas, below dialogs */
+  pointer-events: none;        /* never intercepts clicks */
+  user-select: none;
+  font-family: "Modesto Condensed", "Signika", "Bookmania", serif;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #e8c87a;              /* warm parchment-gold */
+  text-shadow: 0 0 6px rgba(0, 0, 0, 0.85), 0 0 14px rgba(232, 160, 60, 0.3);
+  transform-origin: left center;
+  animation: kott-breathe 5s ease-in-out infinite;
+}
+
+#kottrpg-brand .kott-accent {
+  color: #c9532f;             /* ember red on the KoTT */
+}
+
+/* Slow inhale / exhale — opacity + a gentle swell + a warming glow. */
+@keyframes kott-breathe {
+  0%, 100% {
+    opacity: 0.58;
+    transform: scale(1);
+    text-shadow: 0 0 6px rgba(0, 0, 0, 0.85), 0 0 8px rgba(232, 160, 60, 0.18);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+    text-shadow: 0 0 9px rgba(0, 0, 0, 0.9), 0 0 20px rgba(232, 160, 60, 0.5);
+  }
+}
+
+/* Respect a player's reduced-motion preference — hold it steady, no pulse. */
+@media (prefers-reduced-motion: reduce) {
+  #kottrpg-brand { animation: none; opacity: 0.85; }
+}
