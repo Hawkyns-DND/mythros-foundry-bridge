@@ -25,6 +25,15 @@
 
 const MOD = "mythros-foundry-bridge";
 
+// Shared starter password every new login is created with; the member is forced to
+// replace it on first login (see enforcePasswordChange). Must match the bot's
+// foundry_account_service.STARTER_PASSWORD.
+const STARTER_PASSWORD = "KoTTrpg";
+
+// dnd5e item types that define a character's identity/progression — players may not
+// add, remove, or re-level these (MythrOS owns them). Spells/gear/feats are fine.
+const PLAYER_LOCKED_ITEM_TYPES = new Set(["class", "subclass", "race", "background"]);
+
 function S(key) {
   return game.settings.get(MOD, key);
 }
@@ -85,6 +94,11 @@ Hooks.once("init", () => {
   game.settings.register(MOD, "hideNpcHp", {
     name: "Hide monster HP from players",
     hint: "When a combat starts, set non-PC token bars to GM-only so players can't read monster HP.",
+    scope: "world", config: true, type: Boolean, default: true,
+  });
+  game.settings.register(MOD, "lockPlayerSheets", {
+    name: "Lock core character fields",
+    hint: "Players keep their actor but can't edit MythrOS-owned fields (name, abilities, level, class/race, max HP, AC, proficiencies). Notes, spell prep, and inventory stay editable.",
     scope: "world", config: true, type: Boolean, default: true,
   });
   game.settings.register(MOD, "showBrand", {
@@ -485,6 +499,17 @@ async function applyDiscordCombat(data) {
   }
 }
 
+/** Hand the bot's authoritative loot roll to Hollow Hoard for a read-only display. */
+function showBotLoot(data) {
+  const api = game.modules.get("hollow-hoard")?.api;
+  if (api?.populateFromBot) {
+    try { api.populateFromBot(data.items || [], { encounterIds: data.encounter_ids || [] }); }
+    catch (err) { console.warn(`${MOD} | Hollow Hoard populate failed`, err); }
+  } else {
+    console.warn(`${MOD} | Hollow Hoard not installed/active — loot mirror skipped`);
+  }
+}
+
 // ── Foundry → Discord ─────────────────────────────────────────────────────────
 Hooks.on("createChatMessage", async (message) => {
   try {
@@ -532,13 +557,19 @@ Hooks.on("createChatMessage", async (message) => {
 
 // ── Account bridge: provisioning ops (executed by the primary GM client) ───────
 // MythrOS web sends {id, op, args}; we run the Foundry-side change and reply.
-// Accounts are created PASSWORDLESS — the member sets their password on first login.
+// New logins are created with the shared starter password + a mustChangePassword
+// flag; the member is forced to set their own password on first login.
 async function handleProvisionOp(op, args) {
   switch (op) {
     case "ensure_user": {
       const name = String(args.login || "Adventurer");
       let user = (game.users.getName?.(name)) || game.users.find((u) => u.name === name);
-      if (!user) user = await User.create({ name, role: args.role ?? 1, password: "" });
+      if (!user) {
+        user = await User.create({
+          name, role: args.role ?? 1, password: STARTER_PASSWORD,
+          flags: { [MOD]: { mustChangePassword: true } },
+        });
+      }
       return { userId: user.id };
     }
     case "create_actor": {
@@ -551,7 +582,13 @@ async function handleProvisionOp(op, args) {
     }
     case "reset_password": {
       const u = game.users.get(args.userId);
-      if (u) await u.update({ password: "" }); // cleared → member sets it on next login
+      // Restore the shared starter + forced-change so the member re-sets it on next login.
+      if (u) await u.update({ password: STARTER_PASSWORD, [`flags.${MOD}.mustChangePassword`]: true });
+      return {};
+    }
+    case "rename_user": {
+      const u = game.users.get(args.userId);
+      if (u) await u.update({ name: String(args.login || u.name) });
       return {};
     }
     case "set_role": {
@@ -563,6 +600,104 @@ async function handleProvisionOp(op, args) {
       throw new Error(`unknown op: ${op}`);
   }
 }
+
+// ── Forced first-login password change ─────────────────────────────────────────
+// A login created with the shared starter password carries flags.mythros.
+// mustChangePassword. On ready we block that member with a dialog until they set
+// their own password. Best-effort: if Foundry refuses the self-update, we clear the
+// flag and tell them to ask a GM, rather than trapping them.
+async function enforcePasswordChange() {
+  const u = game.user;
+  if (!u || !u.getFlag(MOD, "mustChangePassword")) return;
+  const Dialog = foundry.applications.api.DialogV2;
+  for (;;) {
+    const res = await Dialog.prompt({
+      window: { title: "Set your Foundry password", icon: "fa-solid fa-key" },
+      content: `
+        <p>Welcome to Ashreach! You're signed in with the shared starter password.
+        Please set your own password to continue.</p>
+        <div class="form-group"><label>New password</label>
+          <input type="password" name="pw1" autocomplete="new-password"/></div>
+        <div class="form-group"><label>Confirm password</label>
+          <input type="password" name="pw2" autocomplete="new-password"/></div>`,
+      ok: { label: "Set password", callback: (_e, btn) => ({
+        pw1: btn.form.pw1.value, pw2: btn.form.pw2.value,
+      }) },
+      rejectClose: false,
+    }).catch(() => null);
+
+    if (!res) { ui.notifications?.warn("You must set a password to continue."); continue; }
+    if (!res.pw1 || res.pw1.length < 4) { ui.notifications?.warn("Use at least 4 characters."); continue; }
+    if (res.pw1 !== res.pw2) { ui.notifications?.warn("Passwords don't match."); continue; }
+    if (res.pw1 === STARTER_PASSWORD) { ui.notifications?.warn("Choose a different password from the starter."); continue; }
+    try {
+      await u.update({ password: res.pw1 });
+      await u.unsetFlag(MOD, "mustChangePassword");
+      ui.notifications?.info("Password updated. You're all set.");
+      return;
+    } catch (err) {
+      console.warn(`${MOD} | self password change failed`, err);
+      try { await u.unsetFlag(MOD, "mustChangePassword"); } catch (e) { /* best-effort */ }
+      ui.notifications?.error("Couldn't set your password automatically — ask a GM to set it for you.");
+      return;
+    }
+  }
+}
+
+// ── Core-field lock: players keep their actor but can't edit MythrOS-owned fields ─
+function touchesLockedActorField(changes) {
+  const flat = foundry.utils.flattenObject(changes || {});
+  for (const key of Object.keys(flat)) {
+    if (key === "name") return true;
+    if (key.startsWith("system.abilities.")) return true;            // ability scores
+    if (key.startsWith("system.attributes.hp.max")) return true;     // max HP (current HP stays editable)
+    if (key.startsWith("system.attributes.ac.")) return true;        // AC
+    if (key.startsWith("system.attributes.prof")) return true;       // proficiency bonus
+    if (key.startsWith("system.details.level")) return true;         // level
+    if (key.startsWith("system.details.xp")) return true;
+    if (key.startsWith("system.details.cr")) return true;
+    if (key.startsWith("system.skills.")) return true;               // skill proficiencies
+    if (key.startsWith("system.traits.")) return true;               // languages + weapon/armor/tool/save proficiencies
+  }
+  return false;
+}
+
+function sheetsLocked() {
+  return S("lockPlayerSheets") && !game.user?.isGM;  // GMs (and the bridge worker GM) always edit freely
+}
+
+Hooks.on("preUpdateActor", (actor, changes) => {
+  if (!sheetsLocked() || actor.type !== "character") return true;
+  if (!touchesLockedActorField(changes)) return true;
+  ui.notifications?.warn("That part of your sheet is kept in sync from MythrOS and can't be edited here.");
+  return false;  // veto
+});
+
+function lockedActorItem(item) {
+  const parent = item?.parent;
+  return parent?.documentName === "Actor" && parent.type === "character"
+    && PLAYER_LOCKED_ITEM_TYPES.has(item.type);
+}
+
+Hooks.on("preCreateItem", (item) => {
+  if (!sheetsLocked() || !lockedActorItem(item)) return true;
+  ui.notifications?.warn("Class, race, and background are managed by MythrOS.");
+  return false;
+});
+Hooks.on("preDeleteItem", (item) => {
+  if (!sheetsLocked() || !lockedActorItem(item)) return true;
+  ui.notifications?.warn("Class, race, and background are managed by MythrOS.");
+  return false;
+});
+Hooks.on("preUpdateItem", (item, changes) => {
+  if (!sheetsLocked() || !lockedActorItem(item)) return true;
+  // Allow incidental edits (e.g. description) but not name or level changes.
+  if (changes.name !== undefined || foundry.utils.hasProperty(changes, "system.levels")) {
+    ui.notifications?.warn("Class level is managed by MythrOS.");
+    return false;
+  }
+  return true;
+});
 
 // ── Discord → Foundry (WebSocket) ──────────────────────────────────────────────
 let _ws = null;
@@ -614,6 +749,9 @@ function connectSocket() {
       if (!isPrimaryGM()) return; // only the canonical GM injects, once
       // Phase B2: a combat snapshot drives Foundry tokens/turn, not the chat log.
       if (data.kind === "combat") { await applyDiscordCombat(data); return; }
+      // Loot mirror: the bot rolled the authoritative hoard for the GM's last
+      // encounter → show it read-only in Hollow Hoard (claiming stays on Discord).
+      if (data.kind === "loot") { showBotLoot(data); return; }
       const speaker = (data.speaker || "Discord").slice(0, 80);
       // flags.mythros.relayed → the outbound hook will skip this, no bounce-back.
       await ChatMessage.create({
@@ -635,7 +773,43 @@ function scheduleReconnect() {
   }, 5000);
 }
 
+/** Pull the GM's most-recent encounter loot from MythrOS and show it in Hollow Hoard. */
+async function fetchLastLoot() {
+  const secret = S("sharedSecret");
+  const gmId = S("gmDiscordId");
+  const base = (S("webBaseUrl") || "").replace(/\/+$/, "");
+  if (!secret || !gmId || !base) { ui.notifications?.warn("Bridge not configured."); return; }
+  const api = game.modules.get("hollow-hoard")?.api;
+  if (!api?.populateFromBot) { ui.notifications?.warn("Hollow Hoard isn't active."); return; }
+  try {
+    const res = await fetch(`${base}/api/v1/foundry/loot/last?gm=${encodeURIComponent(gmId)}`, {
+      headers: { "Authorization": `Bearer ${secret}` },
+    });
+    if (!res.ok) { ui.notifications?.warn("Couldn't fetch the last hoard."); return; }
+    const data = await res.json();
+    if (!(data.items || []).length) { ui.notifications?.info("No recent loot to show."); return; }
+    api.populateFromBot(data.items, { encounterIds: data.encounter_id ? [data.encounter_id] : [] });
+  } catch (err) {
+    console.warn(`${MOD} | fetch last loot failed`, err);
+  }
+}
+
+// "Last Hoard (MythrOS)" scene-control button — reopens the bot's most-recent roll.
+Hooks.on("getSceneControlButtons", (controls) => {
+  if (!game.user?.isGM || !game.modules.get("hollow-hoard")?.active) return;
+  const group = controls?.tokens ?? controls?.token
+    ?? (Array.isArray(controls) ? controls.find((c) => c.name === "tokens" || c.name === "token") : null);
+  if (!group?.tools) return;
+  const tool = {
+    name: "mythros-last-hoard", title: "Last Hoard (MythrOS)", icon: "fa-solid fa-coins",
+    order: 100, button: true, visible: true, onChange: () => fetchLastLoot(), onClick: () => fetchLastLoot(),
+  };
+  if (Array.isArray(group.tools)) group.tools.push(tool);
+  else group.tools["mythros-last-hoard"] = tool;
+});
+
 Hooks.once("ready", () => {
   if (game.user?.isGM) connectSocket();
   injectBrand();   // cosmetic, every client
+  enforcePasswordChange();   // every client: force off the shared starter password
 });
